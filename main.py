@@ -1,15 +1,23 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-import uuid
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 app = FastAPI(
     title="Task Manager API",
-    description="CRUD API built with FastAPI by Manish Kumar Pandit",
-    version="1.0.0"
+    description="CRUD API with MongoDB built by Manish Kumar Pandit",
+    version="2.0.0"
 )
 
-tasks_db = {}
+MONGODB_URL = os.getenv("MONGODB_URL")
+client = AsyncIOMotorClient(MONGODB_URL)
+db = client["taskmanager"]
+collection = db["tasks"]
 
 
 class Task(BaseModel):
@@ -24,90 +32,108 @@ class TaskUpdate(BaseModel):
     completed: Optional[bool] = None
 
 
-@app.get("/")
-def home():
+def task_helper(task) -> dict:
     return {
-        "message": "Welcome to Task Manager API!",
+        "id": str(task["_id"]),
+        "title": task["title"],
+        "description": task["description"],
+        "completed": task["completed"]
+    }
+
+
+@app.get("/")
+async def home():
+    return {
+        "message": "Welcome to Task Manager API v2.0!",
         "developer": "Manish Kumar Pandit",
         "github": "aimanish2030",
+        "database": "MongoDB Atlas",
         "docs": "Go to /docs to test the API"
     }
 
 
 @app.post("/tasks", status_code=201)
-def create_task(task: Task):
-    task_id = str(uuid.uuid4())
-    tasks_db[task_id] = {
-        "id": task_id,
-        "title": task.title,
-        "description": task.description,
-        "completed": task.completed
-    }
+async def create_task(task: Task):
+    task_data = task.dict()
+    result = await collection.insert_one(task_data)
+    new_task = await collection.find_one({"_id": result.inserted_id})
     return {
         "message": "Task created successfully!",
-        "task": tasks_db[task_id]
+        "task": task_helper(new_task)
     }
 
 
 @app.get("/tasks")
-def get_all_tasks():
-    if not tasks_db:
+async def get_all_tasks():
+    tasks = []
+    async for task in collection.find():
+        tasks.append(task_helper(task))
+    if not tasks:
         return {"message": "No tasks found!", "tasks": []}
     return {
-        "total_tasks": len(tasks_db),
-        "tasks": list(tasks_db.values())
+        "total_tasks": len(tasks),
+        "tasks": tasks
     }
 
 
 @app.get("/tasks/{task_id}")
-def get_task(task_id: str):
-    if task_id not in tasks_db:
+async def get_task(task_id: str):
+    try:
+        task = await collection.find_one({"_id": ObjectId(task_id)})
+    except:
+        raise HTTPException(status_code=400, detail="Invalid task ID!")
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found!")
-    return {"task": tasks_db[task_id]}
+    return {"task": task_helper(task)}
 
 
 @app.put("/tasks/{task_id}")
-def update_task(task_id: str, task_update: TaskUpdate):
-    if task_id not in tasks_db:
+async def update_task(task_id: str, task_update: TaskUpdate):
+    try:
+        update_data = {k: v for k, v in task_update.dict().items() if v is not None}
+        result = await collection.update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": update_data}
+        )
+    except:
+        raise HTTPException(status_code=400, detail="Invalid task ID!")
+    if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Task not found!")
-    existing_task = tasks_db[task_id]
-    if task_update.title is not None:
-        existing_task["title"] = task_update.title
-    if task_update.description is not None:
-        existing_task["description"] = task_update.description
-    if task_update.completed is not None:
-        existing_task["completed"] = task_update.completed
-    tasks_db[task_id] = existing_task
+    updated_task = await collection.find_one({"_id": ObjectId(task_id)})
     return {
         "message": "Task updated successfully!",
-        "task": tasks_db[task_id]
+        "task": task_helper(updated_task)
     }
 
 
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id: str):
-    if task_id not in tasks_db:
-        raise HTTPException(status_code=404, detail="Task not found!")
-    deleted_task = tasks_db.pop(task_id)
+async def delete_task(task_id: str):
+    try:
+        task = await collection.find_one({"_id": ObjectId(task_id)})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found!")
+        await collection.delete_one({"_id": ObjectId(task_id)})
+    except HTTPException:
+        raise
+    except:
+        raise HTTPException(status_code=400, detail="Invalid task ID!")
     return {
         "message": "Task deleted successfully!",
-        "deleted_task": deleted_task
+        "deleted_task": task_helper(task)
     }
 
 
 @app.get("/tasks/filter/completed")
-def get_completed_tasks():
-    completed = [t for t in tasks_db.values() if t["completed"] == True]
-    return {
-        "total_completed": len(completed),
-        "tasks": completed
-    }
+async def get_completed_tasks():
+    tasks = []
+    async for task in collection.find({"completed": True}):
+        tasks.append(task_helper(task))
+    return {"total_completed": len(tasks), "tasks": tasks}
 
 
 @app.get("/tasks/filter/pending")
-def get_pending_tasks():
-    pending = [t for t in tasks_db.values() if t["completed"] == False]
-    return {
-        "total_pending": len(pending),
-        "tasks": pending
-    }
+async def get_pending_tasks():
+    tasks = []
+    async for task in collection.find({"completed": False}):
+        tasks.append(task_helper(task))
+    return {"total_pending": len(tasks), "tasks": tasks}
